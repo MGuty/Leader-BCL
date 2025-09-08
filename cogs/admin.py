@@ -55,19 +55,31 @@ class Admin(commands.GroupCog, name="admin", description="Comandos de administra
         save_status(status)
 
     # --- COMANDOS SLASH ---
-    @app_commands.command(name="scan_offline", description="Escanea canales en busca de envíos hechos mientras el bot estaba desconectado.")
+    @app_commands.command(name="scan_offline", description="Escanea canales en busca de envíos.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
-    async def scan_offline_submissions(self, interaction: discord.Interaction):
+    @app_commands.describe(fecha_inicio="[Opcional] Escanea todo desde esta fecha (DD/MM/YYYY).")
+    async def scan_offline_submissions(self, interaction: discord.Interaction, fecha_inicio: str = None):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        status = load_status()
-        last_active_str = status.get('last_online')
-        if not last_active_str:
-            return await interaction.followup.send("No hay una marca de tiempo de la última conexión.")
+        
+        after_timestamp = None
+        scan_mode_message = ""
 
-        after_timestamp = datetime.fromisoformat(last_active_str)
+        if fecha_inicio:
+            try:
+                after_timestamp = datetime.strptime(fecha_inicio, "%d/%m/%Y").replace(tzinfo=timezone.utc)
+                scan_mode_message = f"desde el **{fecha_inicio}**"
+            except ValueError:
+                return await interaction.followup.send("❌ Formato de fecha inválido. Por favor, usa `DD/MM/YYYY`.")
+        else:
+            status = load_status()
+            last_active_str = status.get('last_online')
+            if not last_active_str:
+                return await interaction.followup.send("No hay una marca de tiempo de la última conexión. Usa la opción `fecha_inicio`.")
+            after_timestamp = datetime.fromisoformat(last_active_str)
+            scan_mode_message = "desde la última desconexión"
+
         processed_count = 0
         scan_report = []
-
         cogs_to_scan = {'Ataque': 'attack-', 'Defensa': 'defenses-', 'Koth': KOTH_CHANNEL_ID, 'Tempo': 'tempo-', 'Interserver': 'interserver-'}
 
         for cog_name, identifier in cogs_to_scan.items():
@@ -81,7 +93,8 @@ class Admin(commands.GroupCog, name="admin", description="Comandos de administra
                 if is_target_channel:
                     try:
                         found_in_channel = 0
-                        async for message in channel.history(limit=200, after=after_timestamp, oldest_first=True):
+                        scan_limit = None if fecha_inicio else 200
+                        async for message in channel.history(limit=scan_limit, after=after_timestamp, oldest_first=True):
                             if not message.author.bot:
                                 try:
                                     if await cog.process_submission(message):
@@ -94,12 +107,8 @@ class Admin(commands.GroupCog, name="admin", description="Comandos de administra
                             scan_report.append(f"Canal `#{channel.name}`: {found_in_channel} envíos encontrados.")
                     except discord.Forbidden:
                         scan_report.append(f"No tengo permisos para ver `#{channel.name}`.")
-                    except Exception as e:
-                        scan_report.append(f"Error en `#{channel.name}`: {e}")
-
-        status['last_scan'] = datetime.now(timezone.utc).isoformat()
-        save_status(status)
-        await interaction.followup.send(f"✅ **Escaneo completado.**\nSe procesaron **{processed_count}** nuevos envíos.\n\n**Reporte:**\n- " + "\n- ".join(scan_report if scan_report else ["No se encontraron nuevos envíos."]))
+        
+        await interaction.followup.send(f"✅ **Escaneo completado {scan_mode_message}.**\nSe procesaron **{processed_count}** nuevos envíos.\n\n**Reporte:**\n- " + "\n- ".join(scan_report if scan_report else ["No se encontraron nuevos envíos."]))
 
     @app_commands.command(name="sync", description="Sincroniza manualmente los comandos de barra con Discord.")
     @commands.is_owner()
