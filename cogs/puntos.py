@@ -6,13 +6,14 @@ import json
 from datetime import datetime, timezone
 import os
 import traceback
+import shutil
 
 # --- CONFIGURACIÓN ---
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", 0))
 BOT_AUDIT_LOGS_CHANNEL_ID = int(os.getenv("BOT_AUDIT_LOGS_CHANNEL_ID", 0))
 DB_FILE = 'leaderboard.db'
 SNAPSHOT_FILE = 'ranking_snapshot.json'
-LIVE_RANKING_FILE = 'live_ranking.json' # Archivo de estado para el ranking automático
+LIVE_RANKING_FILE = 'live_ranking.json'
 
 class Puntos(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -25,7 +26,6 @@ class Puntos(commands.Cog):
         self.snapshot_ranking_task.cancel()
         self.update_live_rank_task.cancel()
 
-    # --- Funciones de Ayuda ---
     def _initialize_database(self):
         try:
             con = sqlite3.connect(DB_FILE)
@@ -50,7 +50,6 @@ class Puntos(commands.Cog):
     def save_live_rank_data(self, data):
         with open(LIVE_RANKING_FILE, 'w') as f: json.dump(data, f, indent=4)
 
-    # --- Tareas en Segundo Plano ---
     @tasks.loop(hours=24)
     async def snapshot_ranking_task(self):
         await self.bot.wait_until_ready()
@@ -89,7 +88,6 @@ class Puntos(commands.Cog):
     async def before_update_live_rank(self):
         await self.bot.wait_until_ready()
 
-    # --- Lógica Principal y Métodos Públicos ---
     async def add_points(self, interaction_or_payload, user_id: str, amount: int, category: str):
         try:
             con = sqlite3.connect(DB_FILE)
@@ -117,17 +115,30 @@ class Puntos(commands.Cog):
 
     async def reset_database_for_new_season(self, archive_db_name: str):
         print(f"Iniciando reinicio de base de datos para nueva temporada...")
+        
         if os.path.exists(DB_FILE):
             try:
-                os.rename(DB_FILE, archive_db_name)
-                print(f"Base de datos archivada como '{archive_db_name}'.")
+                shutil.copyfile(DB_FILE, archive_db_name)
+                print(f"Copia de seguridad de la base de datos creada como '{archive_db_name}'.")
             except Exception as e:
                 print(f"Error al archivar la base de datos: {e}")
+        
+        try:
+            con = sqlite3.connect(DB_FILE)
+            cur = con.cursor()
+            cur.execute("DELETE FROM puntuaciones")
+            cur.execute("VACUUM")
+            con.commit()
+            con.close()
+            print("Todos los registros de la tabla 'puntuaciones' han sido eliminados.")
+        except Exception as e:
+            print(f"Error al limpiar la tabla de puntuaciones: {e}")
+
         if os.path.exists(SNAPSHOT_FILE):
             os.remove(SNAPSHOT_FILE)
             print("Snapshot de ranking anterior eliminado.")
-        self._initialize_database()
-        print("Nueva base de datos inicializada para la nueva temporada.")
+        
+        print("Reinicio de base de datos completado.")
 
     async def build_ranking_embed(self, guild: discord.Guild):
         con = sqlite3.connect(DB_FILE)
@@ -168,7 +179,6 @@ class Puntos(commands.Cog):
         embed.set_footer(text="Actualizado")
         return embed
 
-    # --- Comandos Slash ---
     rank_group = app_commands.Group(name="rank", description="Comandos relacionados con el ranking de puntos.")
 
     @rank_group.command(name="ver", description="Muestra la tabla de clasificación de puntos actual.")
