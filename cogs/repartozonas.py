@@ -1,4 +1,3 @@
-# cogs/repartozonas.py (Versión con Repartos Nombrados)
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -12,19 +11,24 @@ ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", 0))
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID", 0))
 REPARTO_STATE_FILE = 'reparto_zonas.json'
 
-class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para el reparto de zonas por fases."):
+class RepartoZonas(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         print("✅ Cog 'RepartoZonas' (Versión Nombrada) cargado.")
 
+    # --- Grupo de Comandos /reparto ---
+    reparto = app_commands.Group(name="reparto", description="Comandos para el reparto de zonas por fases.")
+
     # --- Funciones de Ayuda de Estado ---
     def load_state(self):
+        """Carga el estado actual de todos los repartos desde el archivo JSON."""
         try:
             with open(REPARTO_STATE_FILE, 'r') as f: return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     def save_state(self, data):
+        """Guarda el estado de todos los repartos en el archivo JSON."""
         with open(REPARTO_STATE_FILE, 'w') as f: json.dump(data, f, indent=4)
 
     def _get_active_draft(self, state):
@@ -35,7 +39,7 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
         return None, None
 
     def _parse_zones_from_content(self, content: str):
-        # ... (código sin cambios)
+        """Extrae zonas marcadas como 'Libre' del contenido de un mensaje."""
         found_zones = []
         pattern = re.compile(r"•\s*(.*?)\s*→\s*Libre", re.IGNORECASE)
         for line in content.split('\n'):
@@ -44,8 +48,9 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
                 found_zones.append(match.group(1).strip())
         return found_zones
 
+    # --- Lógica Central del Turno ---
     def _get_current_turn_info(self, draft_data):
-        # ... (código sin cambios, ahora recibe 'draft_data')
+        """Determina a quién le toca jugar según el estado del reparto activo."""
         if not draft_data.get('active'): return None
         try:
             tier_config = draft_data['config']['tiers'][draft_data['current_tier_index']]
@@ -60,7 +65,7 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
         except (IndexError, KeyError): return None
         
     def _advance_turn(self, draft_data):
-        # ... (código sin cambios, ahora modifica 'draft_data')
+        """Avanza el estado al siguiente turno."""
         draft_data['current_player_index_in_tier'] += 1
         current_tier_config = draft_data['config']['tiers'][draft_data['current_tier_index']]
         tier_range = current_tier_config['range']
@@ -76,7 +81,7 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
         return draft_data
 
     # --- Comandos de Administración ---
-    @app_commands.command(name="iniciar", description="Inicia un nuevo reparto con un nombre único.")
+    @reparto.command(name="iniciar", description="Inicia un nuevo reparto con un nombre único.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
     @app_commands.describe(nombre="Nombre único para este reparto (ej. season8).", canal_zonas="Canal con las zonas libres.")
     async def start_reparto(self, interaction: discord.Interaction, nombre: str, canal_zonas: discord.TextChannel):
@@ -124,12 +129,12 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
         
         await interaction.followup.send(f"✅ Reparto '{nombre}' iniciado.", ephemeral=True)
 
-    @app_commands.command(name="finalizar", description="Termina manualmente el reparto de zonas activo.")
+    @reparto.command(name="finalizar", description="Termina manualmente el reparto de zonas activo.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
     async def end_reparto(self, interaction: discord.Interaction):
         state = self.load_state()
-        active_draft_name, active_draft = self._get_active_draft(state)
-        if not active_draft:
+        active_draft_name, _ = self._get_active_draft(state)
+        if not active_draft_name:
             return await interaction.response.send_message("No hay ningún reparto activo para finalizar.", ephemeral=True)
         
         state[active_draft_name]['active'] = False
@@ -140,7 +145,7 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
         if announcement_channel:
             await announcement_channel.send(f"🛑 El reparto '{active_draft_name}' ha sido finalizado por un administrador.")
 
-    @app_commands.command(name="estado", description="Muestra el estado del reparto de zonas activo.")
+    @reparto.command(name="estado", description="Muestra el estado del reparto de zonas activo.")
     async def status_reparto(self, interaction: discord.Interaction):
         await interaction.response.defer()
         state = self.load_state()
@@ -160,10 +165,9 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
                              f"**Ronda de Pick:** {turn_info['pick_round'] + 1} de {turn_info['total_picks']}\n"
                              f"**▶️ Turno de:** <@{turn_info['player_id']}>")
         
-        # ... (el resto del comando 'estado' no cambia)
         await interaction.followup.send(embed=embed)
         
-    @app_commands.command(name="ver", description="Muestra los resultados de un reparto anterior.")
+    @reparto.command(name="ver", description="Muestra los resultados de un reparto anterior.")
     @app_commands.describe(nombre="El nombre del reparto que quieres ver.")
     async def view_reparto(self, interaction: discord.Interaction, nombre: str):
         await interaction.response.defer()
@@ -174,10 +178,10 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
             
         embed = discord.Embed(title=f"📜 Resultados del Reparto: {nombre} 📜", color=discord.Color.green())
         selections_text = []
-        if not draft_data['selections']:
+        if not draft_data.get('selections'):
             selections_text.append("No se realizó ninguna selección en este reparto.")
         else:
-            for player_id_str, zones in draft_data['selections'].items():
+            for player_id_str, zones in sorted(draft_data['selections'].items(), key=lambda item: draft_data['ranked_players'].index(int(item[0]))):
                 try:
                     member = await interaction.guild.fetch_member(int(player_id_str))
                     name = member.display_name
@@ -196,14 +200,62 @@ class RepartoZonas(commands.GroupCog, name="reparto", description="Comandos para
             for name in state.keys() if current.lower() in name.lower()
         ][:25]
 
-# --- COMANDO GLOBAL PARA JUGADORES ---
-# ... (El código de elegir_zona_global y su autocompletado no cambia, funciona sobre el reparto activo)
+    # --- COMANDO INDIVIDUAL /elegir_zona ---
+    @app_commands.command(name="elegir_zona", description="Elige una zona durante el reparto.")
+    @app_commands.describe(zona="La zona que quieres elegir.")
+    async def elegir_zona(self, interaction: discord.Interaction, zona: str):
+        state = self.load_state()
+        draft_name, draft_data = self._get_active_draft(state)
+
+        if not draft_data:
+            return await interaction.response.send_message("No hay ningún reparto de zonas activo.", ephemeral=True)
+
+        turn_info = self._get_current_turn_info(draft_data)
+        if not turn_info or interaction.user.id != turn_info['player_id']:
+            return await interaction.response.send_message("❌ No es tu turno.", ephemeral=True)
+
+        if zona not in draft_data['available_zones']:
+            return await interaction.response.send_message(f"❌ La zona '{zona}' no está disponible o no existe.", ephemeral=True)
+        
+        await interaction.response.defer(thinking=True)
+
+        player_id_str = str(interaction.user.id)
+        if player_id_str not in draft_data['selections']:
+            draft_data['selections'][player_id_str] = []
+        draft_data['selections'][player_id_str].append(zona)
+        draft_data['available_zones'].remove(zona)
+        
+        new_draft_data = self._advance_turn(draft_data)
+        state[draft_name] = new_draft_data
+        self.save_state(state)
+
+        announcement_channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if announcement_channel:
+            await announcement_channel.send(f"✅ <@{interaction.user.id}> ha elegido la zona: **{zona}**")
+            
+            next_turn_info = self._get_current_turn_info(new_draft_data)
+            if new_draft_data['active'] and next_turn_info:
+                next_tier_cfg = new_draft_data['config']['tiers'][next_turn_info['tier_index']]
+                msg = (f"➡️ Es el turno de <@{next_turn_info['player_id']}> "
+                       f"(Pick {next_turn_info['pick_round'] + 1}/{next_tier_cfg['picks']}).")
+                await announcement_channel.send(msg)
+            else:
+                await announcement_channel.send("🏁 **¡Todas las fases del reparto han finalizado!**")
+
+        await interaction.followup.send("¡Tu elección ha sido registrada!", ephemeral=True)
+
+    @elegir_zona.autocomplete('zona')
+    async def zona_autocomplete(self, interaction: discord.Interaction, current: str):
+        state = self.load_state()
+        _, draft_data = self._get_active_draft(state)
+        if not draft_data: return []
+        
+        available_zones = draft_data.get('available_zones', [])
+        return [
+            app_commands.Choice(name=zona, value=zona)
+            for zona in available_zones if current.lower() in zona.lower()
+        ][:25]
+
 
 async def setup(bot: commands.Bot):
-    # ... (El setup no cambia)
-    bot.tree.add_command(elegir_zona_global)
     await bot.add_cog(RepartoZonas(bot))
-
-async def teardown(bot: commands.Bot):
-    # ... (El teardown no cambia)
-    bot.tree.remove_command(elegir_zona_global.name)
