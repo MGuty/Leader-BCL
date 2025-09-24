@@ -1,4 +1,4 @@
-# cogs/temporadas.py (con Fechas Específicas)
+# cogs/temporadas.py (con Separador de Temporada)
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -51,8 +51,7 @@ class Temporadas(commands.GroupCog, name="season", description="Comandos para ge
     async def end_season_logic(self, guild: discord.Guild, interaction_channel: discord.TextChannel = None):
         status = load_season_data()
         if not status.get("active"):
-            if interaction_channel:
-                await interaction_channel.send("No hay ninguna temporada activa para terminar.")
+            if interaction_channel: await interaction_channel.send("No hay ninguna temporada activa para terminar.")
             return
         
         season_number = status.get('season_number', 'X')
@@ -72,9 +71,8 @@ class Temporadas(commands.GroupCog, name="season", description="Comandos para ge
         if puntos_cog:
             await puntos_cog.reset_database_for_new_season(archive_db_name)
             if final_channel:
-                await final_channel.send(f"La base de datos de puntos ha sido reiniciada y la temporada anterior archivada como `{archive_db_name}`.")
+                await final_channel.send(f"La base de datos ha sido reiniciada y la temporada anterior archivada como `{archive_db_name}`.")
 
-    # --- COMANDO /season start MODIFICADO ---
     @app_commands.command(name="start", description="Inicia una nueva temporada con fechas y horas específicas.")
     @app_commands.describe(
         nombre="El nombre para esta nueva temporada (ej. Season 9).",
@@ -89,39 +87,47 @@ class Temporadas(commands.GroupCog, name="season", description="Comandos para ge
         if status.get("active"):
             return await interaction.response.send_message("❌ Ya hay una temporada activa. Termínala primero.", ephemeral=True)
 
-        # 1. Validar y combinar las fechas y horas
         try:
             start_date = datetime.strptime(f"{fecha_inicio} {hora_inicio}", "%d/%m/%Y %H:%M").replace(tzinfo=timezone.utc)
             end_date = datetime.strptime(f"{fecha_fin} {hora_fin}", "%d/%m/%Y %H:%M").replace(tzinfo=timezone.utc)
         except ValueError:
             return await interaction.response.send_message("❌ Formato de fecha u hora inválido. Usa `DD/MM/YYYY` y `HH:MM`.", ephemeral=True)
 
-        # 2. Comprobar que las fechas sean lógicas
         if end_date <= start_date:
             return await interaction.response.send_message("❌ La fecha de finalización debe ser posterior a la fecha de inicio.", ephemeral=True)
 
         if end_date <= datetime.now(timezone.utc):
             return await interaction.response.send_message("❌ La fecha de finalización no puede estar en el pasado.", ephemeral=True)
 
-        # 3. Guardar el nuevo estado de la temporada
+        await interaction.response.defer()
+
         new_season_number = status.get('season_number', 0) + 1
         new_status = {
-            'active': True,
-            'name': nombre,
-            'end_time': end_date.isoformat(), # Guardamos la fecha de fin para el cierre automático
-            'season_number': new_season_number,
-            'channel_id': None
+            'active': True, 'name': nombre, 'end_time': end_date.isoformat(),
+            'season_number': new_season_number, 'channel_id': None
         }
         save_season_data(new_status)
 
-        # 4. Anunciar la nueva temporada
+        # --- NUEVA LÓGICA: Enviar mensaje separador ---
+        separator_message = "╔═══════════ 🏆 Inicio de Season 🏆═══════════╗"
+        channel_prefixes = ['attack-', 'defenses-', 'interserver-']
+        
+        for channel in interaction.guild.text_channels:
+            if any(channel.name.lower().startswith(prefix) for prefix in channel_prefixes):
+                try:
+                    await channel.send(separator_message)
+                except discord.Forbidden:
+                    print(f"No se pudo enviar el mensaje separador al canal {channel.name} (Sin permisos)")
+                except Exception as e:
+                    print(f"Error enviando mensaje separador a {channel.name}: {e}")
+        # --- FIN DE NUEVA LÓGICA ---
+
         embed = discord.Embed(title=f"✨ ¡Nueva Temporada Programada: {nombre}! ✨", color=discord.Color.brand_green())
-        # Usamos format_dt para que la fecha se muestre en la zona horaria de cada usuario
         embed.add_field(name="Inicio", value=discord.utils.format_dt(start_date, 'F'), inline=False)
         embed.add_field(name="Finaliza", value=discord.utils.format_dt(end_date, 'F'), inline=False)
         embed.set_footer(text=f"Temporada #{new_season_number}")
         
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="end", description="Termina la temporada actual de forma manual.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
@@ -151,6 +157,7 @@ class Temporadas(commands.GroupCog, name="season", description="Comandos para ge
                 await interaction.followup.send(error_message, ephemeral=True)
             else:
                 await interaction.response.send_message(error_message, ephemeral=True)
+            
             print(f"Error en un comando de Temporadas por {interaction.user}:")
             traceback.print_exc()
 
