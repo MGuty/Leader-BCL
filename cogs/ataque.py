@@ -21,11 +21,11 @@ JUDGED_ATTACKS_FILE = 'judged_attacks.json'
 # Mantenemos la tabla de puntos original.
 ATTACK_POINTS = [
 #   0 Ene, 1 Ene, 2 Ene, 3 Ene, 4 Ene, 5 Ene
-    [20,      60,   150,   350,   600,   750], # 1 Aliado
-    [20,      20,   120,   230,   510,   680], # 2 Aliados
-    [20,      20,    90,   170,   450,   620], # 3 Aliados
-    [20,      20,    20,   100,   340,   500], # 4 Aliados
-    [20,      20,    20,    20,   150,   450]  # 5 Aliados
+    [2,      30,    75,   175,   300,   375], # 1 Aliado
+    [2,      10,    60,   115,   255,   340], # 2 Aliados
+    [2,      10,    45,    85,   225,   310], # 3 Aliados
+    [2,      10,    10,    50,   170,   250], # 4 Aliados
+    [2,      10,    10,    10,    75,   225]  # 5 Aliados
 ]
 
 class Ataque(commands.Cog):
