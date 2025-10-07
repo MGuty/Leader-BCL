@@ -143,7 +143,7 @@ class Puntos(commands.Cog):
     async def build_ranking_embed(self, guild: discord.Guild):
         con = sqlite3.connect(DB_FILE)
         cur = con.cursor()
-        cur.execute("SELECT user_id, SUM(points) as total_points FROM puntuaciones WHERE guild_id = ? GROUP BY user_id HAVING SUM(points) != 0 ORDER BY total_points DESC LIMIT 25", (guild.id,))
+        cur.execute("SELECT user_id, SUM(points) as total_points FROM puntuaciones WHERE guild_id = ? GROUP BY user_id HAVING SUM(points) != 0 ORDER BY total_points DESC LIMIT 50", (guild.id,))
         current_ranking_data = cur.fetchall()
         con.close()
 
