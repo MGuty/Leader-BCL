@@ -227,6 +227,35 @@ class Puntos(commands.Cog):
         self.save_live_rank_data({})
         await interaction.followup.send("✅ Ranking automático detenido y mensaje eliminado.")
 
+    @rank_group.command(name="clear", description="[ADMIN] Borra todos los puntos del ranking actual.")
+    @app_commands.checks.has_role(ADMIN_ROLE_ID)
+    @app_commands.describe(confirmacion="Escribe 'CONFIRM' para borrar todos los puntos.")
+    async def clear_rank(self, interaction: discord.Interaction, confirmacion: str):
+        if confirmacion.upper() != 'CONFIRM':
+            return await interaction.response.send_message(
+                "❌ **Acción cancelada.** Debes escribir `CONFIRM` para borrar el ranking.",
+                ephemeral=True
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        
+        live_rank_data = self.load_live_rank_data()
+        if live_rank_data.get('message_id'):
+            try:
+                channel = await self.bot.fetch_channel(live_rank_data['channel_id'])
+                message = await channel.fetch_message(live_rank_data['message_id'])
+                await message.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+            self.save_live_rank_data({})
+
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        archive_name = f"manual_clear_{timestamp}.db"
+        
+        await self.reset_database_for_new_season(archive_db_name=archive_name)
+        
+        await interaction.followup.send(f"✅ ¡El ranking ha sido borrado! Se creó una copia de seguridad como `{archive_name}`.")
+
     @app_commands.command(name="points", description="Añade o resta puntos a un usuario manualmente.")
     @app_commands.describe(usuario="El usuario a modificar.", puntos="La cantidad (negativa para restar).", motivo="La razón del ajuste.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
