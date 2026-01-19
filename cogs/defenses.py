@@ -7,11 +7,11 @@ from .base_moderation import BaseModerationCog, PENDING_EMOJI
 # --- TABLA DE PUNTOS ACTUALIZADA ---
 DEFENSE_POINTS = [
 #   0 Ene, 1 Ene, 2 Ene,  3 Ene,  4 Ene,  5 Ene
-    [0,     300,   700,    1500,   2000,   2500], # 1 Aliado
-    [0,      50,   410,     880,   1500,   2000], # 2 Aliados
-    [0,      50,   150,     560,   1100,   1500], # 3 Aliados
-    [0,      50,    50,     330,    830,   1380], # 4 Aliados
-    [0,      50,    50,      50,    600,   1100]  # 5 Aliados
+    [0,     120,   150,     180,    210,   240], # 1 Aliado
+    [0,      90,   120,     150,    180,   210], # 2 Aliados
+    [0,      60,    90,     120,    150,   180], # 3 Aliados
+    [0,      15,    60,      90,    120,   150], # 4 Aliados
+    [0,       8,    15,      60,     90,   120]  # 5 Aliados
 ]
 
 class Defensa(BaseModerationCog):
