@@ -6,12 +6,12 @@ from .base_moderation import BaseModerationCog, PENDING_EMOJI
 
 # --- TABLA DE PUNTOS ACTUALIZADA ---
 ATTACK_POINTS = [
-#   0 Ene, 1 Ene, 2 Ene, 3 Ene, 4 Ene, 5 Ene
-    [2,      30,    75,   175,   300,   375], # 1 Aliado
-    [2,      10,    60,   115,   255,   340], # 2 Aliados
-    [2,      10,    45,    85,   225,   310], # 3 Aliados
-    [2,      10,    10,    50,   170,   250], # 4 Aliados
-    [2,      10,    10,    10,    75,   225]  # 5 Aliados
+#   0 Ene, 1 Ene, 2 Ene,  3 Ene,  4 Ene,  5 Ene
+    [10,      30,    75,      90,    105,   120], # 1 Aliado
+    [ 8,      45,    60,      75,     90,   105], # 2 Aliados
+    [ 6,      30,    45,      60,     75,    90], # 3 Aliados
+    [ 4,       7,    30,      45,     60,    75], # 4 Aliados
+    [ 2,       4,     7,      30,     45,    60]  # 5 Aliados
 ]
 
 class Ataque(BaseModerationCog):
