@@ -1,237 +1,94 @@
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-from datetime import datetime, timezone
-import json
+from discord.ext import commands
 import os
-import traceback
+import json
 
-# --- CONFIGURACIÓN ---
-ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", 0))
-KOTH_CHANNEL_ID = int(os.getenv("KOTH_CHANNEL_ID", 0))
-TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", 0))
-STATUS_FILE = 'bot_status.json'
+# Clase auxiliar para simular el payload de una reacción
+class MockPayload:
+    def __init__(self, message, user):
+        self.message_id = message.id
+        self.channel_id = message.channel.id
+        self.guild_id = message.guild.id
+        self.member = user
+        self.user_id = user.id
 
-# --- FUNCIONES DE AYUDA ---
-def load_status():
-    try:
-        with open(STATUS_FILE, 'r') as f: return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError): return {}
-
-def save_status(data):
-    with open(STATUS_FILE, 'w') as f: json.dump(data, f, indent=4)
-
-@app_commands.guild_only()
-class Admin(commands.GroupCog, name="admin", description="Comandos de administración del bot."):
+class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        super().__init__()
+        self.admin_role_id = int(os.getenv("ADMIN_ROLE_ID", 0))
         
-        # --- REGISTRO DE COMANDOS DE MENÚ CONTEXTUAL ---
-        self.process_manually_ctx_menu = app_commands.ContextMenu(
-            name='Procesar Envío Manualmente',
-            callback=self.process_manually_callback,
-        )
-        self.bot.tree.add_command(self.process_manually_ctx_menu, guild=discord.Object(id=TEST_GUILD_ID))
-        
-        self.reset_submission_ctx_menu = app_commands.ContextMenu(
+        # --- MENÚS CONTEXTUALES (Botón derecho sobre mensajes/usuarios) ---
+        self.ctx_menu_reset = app_commands.ContextMenu(
             name='Resetear Envío',
-            callback=self.reset_submission_callback,
+            callback=self.reset_submission,
         )
-        self.bot.tree.add_command(self.reset_submission_ctx_menu, guild=discord.Object(id=TEST_GUILD_ID))
-        
-        self.update_last_online_time.start()
+        self.bot.tree.add_command(self.ctx_menu_reset)
 
-    def cog_unload(self):
-        self.bot.tree.remove_command(self.process_manually_ctx_menu.name, type=self.process_manually_ctx_menu.type, guild=discord.Object(id=TEST_GUILD_ID))
-        self.bot.tree.remove_command(self.reset_submission_ctx_menu.name, type=self.reset_submission_ctx_menu.type, guild=discord.Object(id=TEST_GUILD_ID))
-        self.update_last_online_time.cancel()
+    async def reset_submission(self, interaction: discord.Interaction, message: discord.Message):
+        """Mueve un envío juzgado de vuelta a pendientes y resta los puntos."""
+        # Verificación de seguridad por rol
+        if not any(role.id == self.admin_role_id for role in interaction.user.roles):
+            return await interaction.response.send_message("❌ No tienes permisos de administrador.", ephemeral=True)
 
-    @tasks.loop(minutes=5.0)
-    async def update_last_online_time(self):
-        await self.bot.wait_until_ready()
-        status = load_status()
-        status['last_online'] = datetime.now(timezone.utc).isoformat()
-        save_status(status)
-
-    # --- COMANDOS SLASH ---
-    @app_commands.command(name="scan_offline", description="Escanea canales en busca de envíos.")
-    @app_commands.checks.has_role(ADMIN_ROLE_ID)
-    @app_commands.describe(fecha_inicio="[Opcional] Escanea todo desde esta fecha (DD/MM/YYYY).")
-    async def scan_offline_submissions(self, interaction: discord.Interaction, fecha_inicio: str = None):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        
-        after_timestamp = None
-        scan_mode_message = ""
-
-        if fecha_inicio:
-            try:
-                after_timestamp = datetime.strptime(fecha_inicio, "%d/%m/%Y").replace(tzinfo=timezone.utc)
-                scan_mode_message = f"desde el **{fecha_inicio}**"
-            except ValueError:
-                return await interaction.followup.send("❌ Formato de fecha inválido. Por favor, usa `DD/MM/YYYY`.")
-        else:
-            status = load_status()
-            last_active_str = status.get('last_online')
-            if not last_active_str:
-                return await interaction.followup.send("No hay una marca de tiempo de la última conexión. Usa la opción `fecha_inicio`.")
-            after_timestamp = datetime.fromisoformat(last_active_str)
-            scan_mode_message = "desde la última desconexión"
-
-        processed_count = 0
-        scan_report = []
-        cogs_to_scan = {'Ataque': 'attack-', 'Defensa': 'defenses-', 'Koth': KOTH_CHANNEL_ID, 'Tempo': 'tempo-', 'Interserver': 'interserver-'}
-
-        for cog_name, identifier in cogs_to_scan.items():
-            cog = self.bot.get_cog(cog_name)
-            if not cog or not hasattr(cog, 'process_submission'): continue
-            
-            for channel in interaction.guild.text_channels:
-                is_target_channel = (isinstance(identifier, str) and channel.name.lower().startswith(identifier)) or \
-                                    (isinstance(identifier, int) and channel.id == identifier)
-                
-                if is_target_channel:
-                    try:
-                        found_in_channel = 0
-                        scan_limit = None if fecha_inicio else 200
-                        async for message in channel.history(limit=scan_limit, after=after_timestamp, oldest_first=True):
-                            if not message.author.bot:
-                                try:
-                                    if await cog.process_submission(message):
-                                        processed_count += 1
-                                        found_in_channel += 1
-                                except Exception as e:
-                                    print(f"Error al procesar mensaje {message.id} en {cog_name}: {e}")
-                        
-                        if found_in_channel > 0:
-                            scan_report.append(f"Canal `#{channel.name}`: {found_in_channel} envíos encontrados.")
-                    except discord.Forbidden:
-                        scan_report.append(f"No tengo permisos para ver `#{channel.name}`.")
-        
-        await interaction.followup.send(f"✅ **Escaneo completado {scan_mode_message}.**\nSe procesaron **{processed_count}** nuevos envíos.\n\n**Reporte:**\n- " + "\n- ".join(scan_report if scan_report else ["No se encontraron nuevos envíos."]))
-
-    @app_commands.command(name="sync", description="Sincroniza manualmente los comandos de barra con Discord.")
-    @commands.is_owner()
-    async def sync_commands(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        try:
-            guild_obj = discord.Object(id=TEST_GUILD_ID) if TEST_GUILD_ID != 0 else None
-            synced = await self.bot.tree.sync(guild=guild_obj)
-            await interaction.followup.send(f"✅ Sincronizados {len(synced)} comandos.")
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error al sincronizar: {e}")
-
-    @app_commands.command(name="limpiar_reacciones", description="Limpia las reacciones de los últimos mensajes de este canal.")
-    @app_commands.checks.has_role(ADMIN_ROLE_ID)
-    @app_commands.describe(cantidad="Número de mensajes a revisar y limpiar (máximo 100).")
-    async def clear_channel_reactions(self, interaction: discord.Interaction, cantidad: int = 50):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        if cantidad > 100:
-            cantidad = 100
         
-        cleaned_count = 0
-        try:
-            async for message in interaction.channel.history(limit=cantidad):
-                if message.reactions:
-                    await message.clear_reactions()
-                    cleaned_count += 1
-            await interaction.followup.send(f"✅ Se han limpiado las reacciones de **{cleaned_count}** mensajes en este canal.")
-        except discord.Forbidden:
-            await interaction.followup.send("❌ No tengo los permisos necesarios para gestionar reacciones en este canal.")
-        except Exception as e:
-            await interaction.followup.send(f"Ocurrió un error: {e}")
+        # Identificar el módulo (ataque, defenses, etc.) por el nombre del canal
+        ch_name = message.channel.name.lower()
+        cog_name = None
+        if ch_name.startswith('ataque-'): cog_name = 'Ataque'
+        elif ch_name.startswith('defenses-'): cog_name = 'Defensa'
+        elif ch_name.startswith('interserver-'): cog_name = 'Interserver'
+        elif ch_name.startswith('koth-'): cog_name = 'KOTH'
 
-    # --- FUNCIONES CALLBACK PARA MENÚS DE CONTEXTO ---
-    async def process_manually_callback(self, interaction: discord.Interaction, message: discord.Message):
-        if not any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles):
-            return await interaction.response.send_message("❌ No tienes el rol de administrador necesario.", ephemeral=True)
-        
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        channel_name = message.channel.name.lower()
-        target_cog_name = None
+        if not cog_name:
+            return await interaction.followup.send("❌ Este canal no pertenece a un módulo de puntos.")
 
-        cog_map = {
-            'Ataque': 'attack-', 'Defensa': 'defenses-', 'Koth': KOTH_CHANNEL_ID,
-            'Tempo': 'tempo-', 'Interserver': 'interserver-'
-        }
-        for cog_name, identifier in cog_map.items():
-            is_target = (isinstance(identifier, str) and channel_name.startswith(identifier)) or \
-                        (isinstance(identifier, int) and message.channel.id == identifier)
-            if is_target:
-                target_cog_name = cog_name
-                break
-        
-        if not target_cog_name:
-            return await interaction.followup.send("❌ Este comando solo se puede usar en un canal de evento válido.")
-
-        cog_to_run = self.bot.get_cog(target_cog_name)
-        if cog_to_run and hasattr(cog_to_run, 'process_submission'):
-            if await cog_to_run.process_submission(message):
-                await interaction.followup.send(f"✅ El envío en `#{message.channel.name}` ha sido añadido a la cola de pendientes.")
-            else:
-                await interaction.followup.send("❌ No se pudo procesar el envío. Puede que ya estuviera procesado o no sea válido.")
-        else:
-            await interaction.followup.send(f"❌ No se pudo encontrar la lógica para procesar envíos de tipo '{target_cog_name}'.")
-
-    async def reset_submission_callback(self, interaction: discord.Interaction, message: discord.Message):
-        if not any(role.id == ADMIN_ROLE_ID for role in interaction.user.roles):
-            return await interaction.response.send_message("❌ No tienes el rol de administrador necesario.", ephemeral=True)
-        
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        channel_name = message.channel.name.lower()
-        cog_map = {
-            'Ataque': 'attack-', 'Defensa': 'defenses-', 'Koth': KOTH_CHANNEL_ID,
-            'Tempo': 'tempo-', 'Interserver': 'interserver-'
-        }
-        target_cog_name = None
-        for cog_name, identifier in cog_map.items():
-            is_target = (isinstance(identifier, str) and channel_name.startswith(identifier)) or \
-                        (isinstance(identifier, int) and message.channel.id == identifier)
-            if is_target:
-                target_cog_name = cog_name
-                break
-        
-        if not target_cog_name:
-            return await interaction.followup.send("❌ Este comando solo se puede usar en un canal de evento válido.")
-
-        cog = self.bot.get_cog(target_cog_name)
+        cog = self.bot.get_cog(cog_name)
         if not cog:
-            return await interaction.followup.send(f"❌ Error: El módulo '{target_cog_name}' no está cargado.")
+            return await interaction.followup.send(f"❌ El módulo {cog_name} no está cargado.")
 
-        message_id_str = str(message.id)
-        if message_id_str in cog.judged_submissions:
-            submission = cog.judged_submissions[message_id_str]
-            if submission.get('status') == 'approved':
-                class MockPayload:
-                    def __init__(self, msg, member):
-                        self.message_id, self.channel_id, self.guild_id, self.member = msg.id, msg.channel.id, msg.guild.id, member
-                
-                await cog._revert_points(MockPayload(message, interaction.user), submission)
-                
-            del cog.judged_submissions[message_id_str]
-            cog.save_data(cog.judged_submissions, cog.judged_file)
+        msg_id = str(message.id)
+        if msg_id not in cog.judged_submissions:
+            return await interaction.followup.send("❌ Este mensaje no está en la lista de envíos juzgados.")
 
-        if message_id_str in cog.pending_submissions:
-            del cog.pending_submissions[message_id_str]
+        try:
+            # Recuperamos el envío
+            submission = cog.judged_submissions.pop(msg_id)
+            
+            # --- CORRECCIÓN CRÍTICA: Multiplicador sincronizado ---
+            # Ahora pasamos el multiplicador guardado (o 1.0 si no existe) para que coincida con la nueva firma
+            mult = submission.get('multiplier', 1.0)
+            await cog._revert_points(MockPayload(message, interaction.user), submission, multiplier=mult)
+            
+            # Devolvemos el envío a pendientes y limpiamos reacciones
+            cog.pending_submissions[msg_id] = {
+                'points': submission['points'],
+                'allies': submission['allies'],
+                'channel_id': message.channel.id
+            }
+            
             cog.save_data(cog.pending_submissions, cog.pending_file)
-
-        if message.reactions:
+            cog.save_data(cog.judged_submissions, cog.judged_file)
+            
             await message.clear_reactions()
+            await message.add_reaction('📝') # Emoji de pendiente
+            
+            await interaction.followup.send(f"✅ Envío reseteado. Los puntos ({int(submission['points'] * mult)}) han sido restados.")
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error al resetear: {str(e)}")
 
-        if await cog.process_submission(message):
-            await interaction.followup.send(f"✅ El envío ha sido reseteado y está pendiente de aprobación de nuevo.")
-        else:
-            await interaction.followup.send(f"❌ El envío fue reseteado, pero no pudo ser añadido a pendientes (puede que ya no sea válido).")
+    # --- COMANDO DE SINCRONIZACIÓN MANUAL ---
+    @commands.command()
+    @commands.is_owner() # Solo tú como dueño del bot puedes usar esto
+    async def sync(self, ctx):
+        """Sincroniza los comandos de barra manualmente con el VPS."""
+        try:
+            fmt = await self.bot.tree.sync()
+            await ctx.send(f"✅ Se han sincronizado {len(fmt)} comandos en este servidor.")
+        except Exception as e:
+            await ctx.send(f"❌ Error de sincronización: {e}")
 
-    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, (app_commands.MissingRole, commands.NotOwner)):
-            await interaction.response.send_message("❌ No tienes los permisos necesarios para esta acción.", ephemeral=True)
-        else:
-            print(f"Error en un comando de Admin por {interaction.user}:")
-            traceback.print_exc()
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ocurrió un error inesperado.", ephemeral=True)
-
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(Admin(bot))
