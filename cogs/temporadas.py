@@ -4,31 +4,35 @@ from discord.ext import commands, tasks
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import traceback
+import sqlite3
 
 # --- CONFIGURACIÓN ---
 ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", 0))
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID", 0))
 TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", 0))
+
+# --- CONSTANTES DE ARCHIVOS ---
 SEASON_STATUS_FILE = 'season_status.json'
 
 # --- FUNCIONES DE AYUDA ---
 def load_season_data():
-    """Carga el estado de la temporada desde el archivo JSON."""
+    """Carga el estado de la temporada desde un archivo JSON."""
     try:
         with open(SEASON_STATUS_FILE, 'r') as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {'active': False, 'name': None, 'end_time': None, 'season_number': 0}
+        return {'active': False, 'name': None, 'end_time': None, 'channel_id': None, 'season_number': 0}
 
 def save_season_data(data):
-    """Guarda el estado de la temporada en el archivo JSON."""
+    """Guarda el estado actual de la temporada en el archivo JSON."""
     with open(SEASON_STATUS_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
+# --- COG DE TEMPORADAS ---
 @app_commands.guild_only()
-class Temporadas(commands.GroupCog, name="season", description="Gestión de las temporadas del ranking."):
+class Temporadas(commands.GroupCog, name="season", description="Comandos para gestionar las temporadas del ranking."):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         super().__init__()
@@ -39,102 +43,117 @@ class Temporadas(commands.GroupCog, name="season", description="Gestión de las 
 
     @tasks.loop(hours=1)
     async def check_season_end(self):
-        """Verifica automáticamente si la temporada ha llegado a su fin."""
+        """Verifica cada hora si la temporada activa ha finalizado."""
         status = load_season_data()
         if status.get("active") and status.get("end_time"):
             end_time = datetime.fromisoformat(status["end_time"])
             if datetime.now(timezone.utc) >= end_time:
-                guild = self.bot.get_guild(TEST_GUILD_ID) or self.bot.guilds[0]
+                print(f"Temporada '{status['name']}' finalizada automáticamente.")
+                guild = self.bot.get_guild(TEST_GUILD_ID) if TEST_GUILD_ID != 0 else self.bot.guilds[0]
                 if guild:
                     await self.end_season_logic(guild)
 
     @check_season_end.before_loop
     async def before_check_season_end(self):
+        """Espera a que el bot esté listo antes de iniciar el bucle."""
         await self.bot.wait_until_ready()
 
     async def end_season_logic(self, guild: discord.Guild, interaction_channel: discord.TextChannel = None):
-        """Lógica para cerrar la temporada, archivar datos y limpiar el ranking."""
+        """Lógica reutilizable y corregida para finalizar una temporada."""
         status = load_season_data()
         if not status.get("active"):
             if interaction_channel:
-                await interaction_channel.send("No hay ninguna temporada activa.")
+                await interaction_channel.send("No hay ninguna temporada activa para terminar.")
             return
-
-        season_number = status.get('season_number', 'X')
-        save_season_data({"active": False, "name": None, "end_time": None, "season_number": season_number})
 
         announcement_channel = self.bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
         final_channel = announcement_channel or interaction_channel
+        if not final_channel:
+            print("Error: No se encontró un canal para el anuncio de fin de temporada.")
+            return
+
+        # Anuncia el fin de la temporada
+        await final_channel.send(f"🏁 **¡La Temporada '{status['name']}' ha finalizado!** 🏁")
         
-        if final_channel:
-            await final_channel.send(f"🏁 **¡La Temporada '{status['name']}' ha finalizado!** 🏁")
-        
-        # Llamada al módulo de Puntos para el reinicio real de la base de datos
+        # Procede directamente a reiniciar la base de datos
         puntos_cog = self.bot.get_cog('Puntos')
+        season_number = status.get('season_number', 'X')
         archive_db_name = f'season-{season_number}-leaderboard.db'
         
         if puntos_cog:
             await puntos_cog.reset_database_for_new_season(archive_db_name)
             if final_channel:
-                await final_channel.send(f"✅ Ranking reiniciado. Datos archivados en `{archive_db_name}`.")
+                await final_channel.send(f"La base de datos de puntos ha sido reiniciada y la temporada anterior archivada como `{archive_db_name}`.")
+        
+        # Guarda el nuevo estado de la temporada (inactiva)
+        save_season_data({"active": False, "name": None, "end_time": None, "season_number": season_number, "channel_id": None})
 
+    # --- COMANDOS ---
     @app_commands.command(name="start", description="Inicia una nueva temporada.")
-    @app_commands.describe(
-        nombre="Ej: Season 9",
-        fecha_fin="Formato DD/MM/YYYY",
-        hora_fin="Formato HH:MM (UTC)"
-    )
+    @app_commands.describe(nombre="El nombre para esta nueva temporada.", duracion="Duración (ej: 30d, 4w, 12h).")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
-    async def season_start(self, interaction: discord.Interaction, nombre: str, fecha_fin: str, hora_fin: str = "00:00"):
+    async def season_start(self, interaction: discord.Interaction, nombre: str, duracion: str):
         status = load_season_data()
         if status.get("active"):
-            return await interaction.response.send_message("❌ Ya hay una temporada activa.", ephemeral=True)
+            return await interaction.response.send_message("❌ Ya hay una temporada activa. Termínala primero.", ephemeral=True)
 
-        try:
-            end_date = datetime.strptime(f"{fecha_fin} {hora_fin}", "%d/%m/%Y %H:%M").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return await interaction.response.send_message("❌ Formato inválido. Usa `DD/MM/YYYY` y `HH:MM`.", ephemeral=True)
+        match = re.match(r"(\d+)([dhw])", duracion.lower())
+        if not match:
+            return await interaction.response.send_message("❌ Formato de duración inválido. Usa un número seguido de 'd', 'w', o 'h'.", ephemeral=True)
 
-        if end_date <= datetime.now(timezone.utc):
-            return await interaction.response.send_message("❌ La fecha de fin debe ser futura.", ephemeral=True)
+        value, unit = int(match.group(1)), match.group(2)
+        delta = {'d': timedelta(days=value), 'w': timedelta(weeks=value), 'h': timedelta(hours=value)}.get(unit)
 
-        await interaction.response.defer()
+        start_date = datetime.now(timezone.utc)
+        end_date = start_date + delta
+        new_season_number = status.get('season_number', 0) + 1
 
-        new_number = status.get('season_number', 0) + 1
-        save_season_data({
+        new_status = {
             'active': True, 'name': nombre, 'end_time': end_date.isoformat(),
-            'season_number': new_number
-        })
+            'season_number': new_season_number, 'channel_id': None
+        }
+        save_season_data(new_status)
 
-        # Mensaje separador solicitado para canales de ataque, defensa e interserver
-        separator = "╔═══════════ 🏆 Inicio de Season 🏆═══════════╗"
-        prefixes = ['attack-', 'defenses-', 'interserver-']
+        embed = discord.Embed(title=f"✨ ¡Nueva Temporada Iniciada: {nombre}! ✨", color=discord.Color.brand_green())
+        embed.add_field(name="Inicio", value=discord.utils.format_dt(start_date, 'F'), inline=False)
+        embed.add_field(name="Finaliza", value=discord.utils.format_dt(end_date, 'F'), inline=False)
+        embed.set_footer(text=f"Temporada #{new_season_number}")
         
-        for channel in interaction.guild.text_channels:
-            if any(channel.name.lower().startswith(p) for p in prefixes):
-                try:
-                    await channel.send(separator)
-                except: continue
+        await interaction.response.send_message(embed=embed)
 
-        embed = discord.Embed(title=f"✨ ¡Temporada {nombre} Iniciada! ✨", color=discord.Color.green())
-        embed.add_field(name="Finaliza", value=discord.utils.format_dt(end_date, 'F'))
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="end", description="Termina la temporada manual.")
+    @app_commands.command(name="end", description="Termina la temporada actual de forma manual.")
     @app_commands.checks.has_role(ADMIN_ROLE_ID)
     async def season_end(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         await self.end_season_logic(interaction.guild, interaction.channel)
-        await interaction.followup.send("Temporada finalizada.")
+        await interaction.followup.send("La temporada ha sido finalizada manualmente.")
 
-    @app_commands.command(name="status", description="Ver estado actual.")
+    @app_commands.command(name="status", description="Muestra el estado de la temporada actual.")
     async def season_status(self, interaction: discord.Interaction):
         status = load_season_data()
         if status.get("active"):
-            end = datetime.fromisoformat(status["end_time"])
-            await interaction.response.send_message(f"Temporada: **{status['name']}**\nTermina: {discord.utils.format_dt(end, 'R')}")
+            end_time = datetime.fromisoformat(status["end_time"])
+            embed = discord.Embed(title=f"Temporada en Curso: {status['name']}", color=discord.Color.blue())
+            embed.add_field(name="Finaliza", value=f"{discord.utils.format_dt(end_time, style='F')} ({discord.utils.format_dt(end_time, style='R')})")
+            embed.set_footer(text=f"Temporada #{status.get('season_number', 'N/A')}")
+            await interaction.response.send_message(embed=embed)
         else:
-            await interaction.response.send_message("No hay temporadas activas.")
+            await interaction.response.send_message("No hay ninguna temporada activa en este momento.")
+
+    async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        """Manejador de errores local para este Cog."""
+        if isinstance(error, app_commands.MissingRole):
+            await interaction.response.send_message("❌ No tienes el rol de administrador necesario para usar este comando.", ephemeral=True)
+        else:
+            # Lógica mejorada para evitar el error "Unknown Interaction"
+            error_message = "Ocurrió un error inesperado."
+            if interaction.response.is_done():
+                await interaction.followup.send(error_message, ephemeral=True)
+            else:
+                await interaction.response.send_message(error_message, ephemeral=True)
+            
+            print(f"Error en un comando de Temporadas por {interaction.user}:")
+            traceback.print_exc()
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Temporadas(bot))

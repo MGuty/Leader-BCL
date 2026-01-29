@@ -15,7 +15,10 @@ KOTH_EVENT_FILE = 'koth_event.json'
 # La clase hereda del GroupCog de discord.py y de nuestra plantilla
 class Koth(commands.GroupCog, BaseModerationCog, name="koth", description="Comandos para gestionar eventos KOTH"):
     def __init__(self, bot: commands.Bot):
-        # Llama al inicializador de la cadena de herencia
+        # --- CORRECCIÓN AQUÍ ---
+        # Simplificamos el __init__. Llamamos al 'super()' que se encargará
+        # de inicializar correctamente la cadena de herencia.
+        # Le pasamos los argumentos que necesita nuestra BaseModerationCog.
         super().__init__(bot, "koth")
         
         # Carga los datos específicos del evento Koth

@@ -1,4 +1,4 @@
-# bot.py (Final y Corregido)
+# bot.py (Estructura Final y Corregida)
 import discord
 from discord.ext import commands
 import os
@@ -10,24 +10,28 @@ from dotenv import load_dotenv
 found_dotenv = load_dotenv()
 if not found_dotenv:
     print("❌ ¡ERROR CRÍTICO! No se encontró el archivo .env.")
-    sys.exit()
+    sys.exit() # Detiene el script si no hay .env
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", 0))
 
+# --- SUBCLASE DE BOT PERSONALIZADA ---
 class KompanyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.guilds = True
         intents.reactions = True
-        intents.members = True # Importante para que el bot vea a los miembros
         super().__init__(command_prefix='!', intents=intents)
 
     async def setup_hook(self):
+        """
+        Se ejecuta automáticamente después de que el bot se conecta.
+        Es el lugar perfecto para cargar los cogs y sincronizar comandos.
+        """
         print("--- Cargando Módulos (Cogs) ---")
         for filename in os.listdir('./cogs'):
-            # CORRECCIÓN: Ignora el archivo de la plantilla base
+            # CORRECCIÓN: Se añade la condición para ignorar la plantilla base.
             if filename.endswith('.py') and not filename.startswith('__') and filename != 'base_moderation.py':
                 extension_name = f'cogs.{filename[:-3]}'
                 try:
@@ -40,25 +44,31 @@ class KompanyBot(commands.Bot):
         print("\n--- Sincronizando comandos de barra (Slash Commands) ---")
         try:
             if TEST_GUILD_ID != 0:
+                # Sincronización para el servidor de pruebas (instantánea).
                 guild = discord.Object(id=TEST_GUILD_ID)
                 self.tree.copy_global_to(guild=guild)
                 synced_commands = await self.tree.sync(guild=guild)
                 print(f"✅ ¡Se sincronizaron {len(synced_commands)} comandos para el servidor de pruebas!")
             else:
+                # Sincronización global (puede tardar hasta 1 hora).
                 synced_commands = await self.tree.sync()
                 print(f"✅ ¡Se sincronizaron {len(synced_commands)} comandos globalmente!")
         except Exception as e:
             print(f"❌ Error al sincronizar comandos: {e}")
 
     async def on_ready(self):
+        """
+        Este evento se dispara cuando el bot está completamente listo y operativo.
+        """
         print('--------------------------------------------------')
         print(f'✅ ¡Bot conectado como {self.user}!')
         print(f'   ID del Bot: {self.user.id}')
         print('--------------------------------------------------')
 
+# --- PUNTO DE ENTRADA ---
 async def main():
     if not TOKEN:
-        print("❌ ERROR FATAL: No se encontró el DISCORD_TOKEN.")
+        print("❌ ERROR FATAL: No se encontró el DISCORD_TOKEN en el archivo .env. El bot no puede iniciar.")
         return
     
     bot = KompanyBot()
