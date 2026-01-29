@@ -1,15 +1,17 @@
+# base_moderation.py
 import discord
 from discord.ext import commands
 import json
 import os
 import traceback
 
-# --- Emojis Comunes ---
+# --- Emojis ---
 PENDING_EMOJI = '📝'
 APPROVE_EMOJI = '✅'
 DENY_EMOJI = '❌'
+FIRE_EMOJI = '🔥'  # Multiplicador x2
+MOON_EMOJI = '🌕'  # Multiplicador x1.5
 
-# Esta clase es la "plantilla" y debe heredar de commands.Cog
 class BaseModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot, cog_name: str):
         self.bot = bot
@@ -22,127 +24,157 @@ class BaseModerationCog(commands.Cog):
         self.log_channel_id = int(os.getenv("BOT_AUDIT_LOGS_CHANNEL_ID", 0))
 
     def load_data(self, filename):
-        """Carga datos desde un archivo JSON, devolviendo un diccionario vacío si falla."""
+        """Carga datos desde un archivo JSON."""
         try:
             with open(filename, 'r') as f: return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError): return {}
 
     def save_data(self, data, filename):
-        """Guarda datos en un archivo JSON con formato legible."""
+        """Guarda datos en un archivo JSON."""
         with open(filename, 'w') as f: json.dump(data, f, indent=4)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         """
-        Listener central que maneja las reacciones para todos los cogs de moderación.
+        Listener central que maneja las reacciones y multiplicadores.
         """
         if not self.is_relevant_channel(payload.channel_id):
             return
 
-        if payload.member.bot or not any(role.id == self.admin_role_id for role in payload.member.roles): return
+        # Solo administradores pueden procesar
+        if payload.member.bot or not any(role.id == self.admin_role_id for role in payload.member.roles): 
+            return
         
         message_id_str = str(payload.message_id)
         emoji = str(payload.emoji)
         
-        if emoji not in [APPROVE_EMOJI, DENY_EMOJI]: return
+        # Definir grupos de emojis
+        approve_emojis = [APPROVE_EMOJI, FIRE_EMOJI, MOON_EMOJI]
+        all_status_emojis = approve_emojis + [DENY_EMOJI]
+
+        if emoji not in all_status_emojis: 
+            return
         
         is_pending = message_id_str in self.pending_submissions
         is_judged = message_id_str in self.judged_submissions
-        if not is_pending and not is_judged: return
+        
+        if not is_pending and not is_judged: 
+            return
 
-        # Lógica para eliminar todas las reacciones opuestas
-        opposite_emoji = DENY_EMOJI if emoji == APPROVE_EMOJI else APPROVE_EMOJI
+        # 1. Determinar el multiplicador basado en el emoji
+        multiplier = 1.0
+        if emoji == FIRE_EMOJI: multiplier = 2.0
+        elif emoji == MOON_EMOJI: multiplier = 1.5
+
+        # 2. Limpieza de reacciones opuestas (Si pones ✅, quita ❌, 🔥 y 🌕)
         try:
             channel = self.bot.get_channel(payload.channel_id)
             if channel:
                 message = await channel.fetch_message(payload.message_id)
                 for reaction in message.reactions:
-                    if str(reaction.emoji) == opposite_emoji:
+                    react_str = str(reaction.emoji)
+                    if react_str in all_status_emojis and react_str != emoji:
                         async for user in reaction.users():
                             if not user.bot:
-                                await message.remove_reaction(opposite_emoji, user)
-                        break
+                                await message.remove_reaction(react_str, user)
         except (discord.NotFound, discord.Forbidden):
-            print(f"No se pudo eliminar la reacción opuesta del mensaje {message_id_str}.")
+            pass
 
         puntos_cog = self.bot.get_cog('Puntos')
         
+        # CASO A: El envío está pendiente
         if is_pending:
             submission = self.pending_submissions.pop(message_id_str)
-            self.save_data(self.pending_submissions, self.pending_file)
+            submission['multiplier'] = multiplier # Guardamos el multiplicador usado
             
-            if emoji == APPROVE_EMOJI:
+            if emoji in approve_emojis:
                 if puntos_cog:
-                    await self._award_points(payload, submission)
+                    await self._award_points(payload, submission, multiplier)
+                
                 submission['status'] = 'approved'
                 if 'points' in submission:
                     submission['points_base'] = submission['points']
+                
                 self.judged_submissions[message_id_str] = submission
+                self.save_data(self.pending_submissions, self.pending_file)
                 self.save_data(self.judged_submissions, self.judged_file)
-                await self.send_log_message(payload, submission, self.cog_name.capitalize(), "aprobado")
+                await self.send_log_message(payload, submission, self.cog_name.capitalize(), "aprobado", multiplier)
             
             elif emoji == DENY_EMOJI:
                 submission['status'] = 'denied'
                 self.judged_submissions[message_id_str] = submission
+                self.save_data(self.pending_submissions, self.pending_file)
                 self.save_data(self.judged_submissions, self.judged_file)
                 await self.send_log_message(payload, submission, self.cog_name.capitalize(), "rechazado")
         
+        # CASO B: El envío ya fue juzgado (cambio de decisión)
         elif is_judged:
             submission = self.judged_submissions[message_id_str]
             old_status = submission.get('status')
+            old_multiplier = submission.get('multiplier', 1.0)
 
-            if (emoji == APPROVE_EMOJI and old_status == 'approved') or (emoji == DENY_EMOJI and old_status == 'denied'):
-                return
+            # Si reaccionan con el mismo estado y mismo multiplicador, no hacer nada
+            if emoji == DENY_EMOJI and old_status == 'denied': return
+            if emoji in approve_emojis and old_status == 'approved' and multiplier == old_multiplier: return
 
-            if emoji == APPROVE_EMOJI and old_status == 'denied':
+            # Si cambia de Denegado a Aprobado (o cambia el multiplicador de aprobación)
+            if emoji in approve_emojis:
                 if puntos_cog:
-                    await self._award_points(payload, submission)
+                    # Si ya estaba aprobado, primero revertimos los puntos viejos
+                    if old_status == 'approved':
+                        await self._revert_points(payload, submission)
+                    # Otorgamos con el nuevo multiplicador
+                    await self._award_points(payload, submission, multiplier)
+                
                 submission['status'] = 'approved'
-                self.judged_submissions[message_id_str] = submission
+                submission['multiplier'] = multiplier
                 self.save_data(self.judged_submissions, self.judged_file)
-                await self.log_decision_change(payload, self.cog_name.capitalize(), "APROBADO")
+                await self.log_decision_change(payload, self.cog_name.capitalize(), f"APROBADO (x{multiplier})")
 
+            # Si cambia de Aprobado a Denegado
             elif emoji == DENY_EMOJI and old_status == 'approved':
                 if puntos_cog:
                     await self._revert_points(payload, submission)
+                
                 submission['status'] = 'denied'
-                self.judged_submissions[message_id_str] = submission
+                # Mantenemos el multiplicador en el registro por si se vuelve a activar
                 self.save_data(self.judged_submissions, self.judged_file)
                 await self.log_decision_change(payload, self.cog_name.capitalize(), "RECHAZADO")
 
-    # --- Métodos abstractos (deben ser implementados por los cogs hijos) ---
+    # --- Métodos abstractos (Deben actualizarse en los Cogs hijos) ---
     def is_relevant_channel(self, channel_id: int) -> bool:
-        """Comprueba si un canal es relevante para este módulo específico."""
-        raise NotImplementedError("Cada cog debe implementar 'is_relevant_channel'")
+        raise NotImplementedError()
 
-    async def _award_points(self, payload, submission):
-        """Define la lógica específica para otorgar puntos."""
-        raise NotImplementedError("Cada cog debe implementar su propia lógica para dar puntos.")
+    async def _award_points(self, payload, submission, multiplier: float):
+        raise NotImplementedError()
 
     async def _revert_points(self, payload, submission):
-        """Define la lógica específica para revertir puntos."""
-        raise NotImplementedError("Cada cog debe implementar su propia lógica para quitar puntos.")
+        raise NotImplementedError()
 
-    # --- Funciones de Logs (Comunes a todos) ---
-    async def send_log_message(self, payload, submission, type_str, action_str):
+    # --- Logs ---
+    async def send_log_message(self, payload, submission, type_str, action_str, multiplier=1.0):
         log_channel = self.bot.get_channel(self.log_channel_id)
         if not log_channel: return
         
         message_link = f"https://discord.com/channels/{payload.guild_id}/{payload.channel_id}/{payload.message_id}"
         
         if action_str == "aprobado":
-            points = submission.get('points_base', submission.get('points', 'N/A'))
+            points_base = submission.get('points_base', submission.get('points', 0))
+            total_points = int(points_base * multiplier)
             unique_ally_mentions = [f"<@{uid}>" for uid in set(submission['allies'])]
-            log_text = f"{APPROVE_EMOJI} **{type_str}** {action_str} por {payload.member.mention}. [Ir al envío]({message_link})"
             
-            # Mensaje de log inteligente: genérico para puntos variables, específico para puntos fijos.
-            if self.cog_name in ['koth']: 
-                 log_text += f"\n> Se han otorgado puntos a: {', '.join(unique_ally_mentions)}."
-            else:
-                 log_text += f"\n> Se han otorgado **`{points}`** puntos por mención a: {', '.join(unique_ally_mentions)}."
+            # Icono dinámico según multiplicador
+            icon = APPROVE_EMOJI
+            if multiplier == 2.0: icon = FIRE_EMOJI
+            elif multiplier == 1.5: icon = MOON_EMOJI
+
+            mult_text = f" (Multiplicador x{multiplier})" if multiplier != 1.0 else ""
+            
+            log_text = f"{icon} **{type_str}** aprobado por {payload.member.mention}. [Ir al envío]({message_link})"
+            log_text += f"\n> Se han otorgado **`{total_points}`** puntos{mult_text} a: {', '.join(unique_ally_mentions)}."
             await log_channel.send(log_text)
-        else: # Rechazado
-            await log_channel.send(f"{DENY_EMOJI} **{type_str}** {action_str} por {payload.member.mention}. [Ir al envío]({message_link})")
+        else:
+            await log_channel.send(f"{DENY_EMOJI} **{type_str}** rechazado por {payload.member.mention}. [Ir al envío]({message_link})")
 
     async def log_decision_change(self, payload, type_str, new_status_str):
         log_channel = self.bot.get_channel(self.log_channel_id)
